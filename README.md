@@ -9,3 +9,5 @@ Signed trigger input-shape diagnostic.
 Validate exact allowed trigger bindings.
 
 Signed event rerun after policy syntax correction.
+
+Validate omitted optional base input.
