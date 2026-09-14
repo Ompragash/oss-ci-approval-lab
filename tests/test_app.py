@@ -28,3 +28,7 @@ def test_prepared_asset():
         asset = json.load(f)
     assert asset["currency"] == "USD"
     assert total_cost(asset["items"], asset["discount_percent"]) == 27
+
+
+def test_contributor_revision():
+    assert total_cost([10, 20], 10) == 27
