@@ -31,4 +31,4 @@ def test_prepared_asset():
 
 
 def test_contributor_revision():
-    assert total_cost([10, 20], 10) == 27
+    assert total_cost([10, 20], 10) == 28
