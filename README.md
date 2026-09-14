@@ -5,3 +5,5 @@ Approach 3 builds on isolated trusted preparation, contributor tests and trusted
 External contributor approval test.
 
 Signed trigger input-shape diagnostic.
+
+Validate exact allowed trigger bindings.
