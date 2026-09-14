@@ -1,0 +1,177 @@
+pipeline:
+  clone:
+    enabled: false
+  timeout: 2h
+  inputs:
+    head_sha:
+      type: string
+      default: ''
+    pr_number:
+      type: string
+      default: ''
+    base_sha:
+      type: string
+      default: ''
+  stages:
+  - id: verify_pr_identity
+    runtime: cloud
+    clone:
+      enabled: false
+    cache:
+      enabled: false
+    steps:
+    - id: snapshot_pr
+      run:
+        shell: bash
+        script: "set -eu\npython3 - <<'CODE'\nimport json,os,re,shlex,urllib.request\nfrom pathlib import Path\nnumber=os.environ['PR_NUMBER'];head=os.environ['EXPECTED_SHA'];expected_base=os.environ['EXPECTED_BASE_SHA']\n\
+          assert re.fullmatch(r'[1-9][0-9]*',number), 'Positive PR number required'\nassert re.fullmatch(r'[0-9a-f]{40}',head),\
+          \ 'Full PR head SHA required'\nassert not expected_base or re.fullmatch(r'[0-9a-f]{40}',expected_base), 'Full base\
+          \ SHA required'\ndef api(path):\n    req=urllib.request.Request('https://api.github.com/repos/ansibleautomates/oss-ci-approval-lab/'+path,headers={'Accept':'application/vnd.github+json'})\n\
+          \    with urllib.request.urlopen(req,timeout=30) as response:return json.load(response)\npr=api('pulls/'+number)\n\
+          assert pr['state']=='open' and pr['base']['repo']['id']==1369877762 and pr['base']['ref']=='main', 'Wrong PR destination\
+          \ or closed PR'\nassert pr['head']['repo'] is not None, 'Deleted source repository'\nassert pr['head']['sha']==head,\
+          \ 'PR changed since trigger; use the new revision'\nbase=api('git/ref/heads/main')['object']['sha']\nassert not\
+          \ expected_base or expected_base==base, 'Base changed; use the current base revision'\nassert re.fullmatch(r'[0-9a-f]{40}',base)\n\
+          author=pr['user']['login'];repo=pr['head']['repo']['full_name']\nassert re.fullmatch(r'[A-Za-z0-9-]+',author) and\
+          \ re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+',repo)\nexternal=pr['head']['repo']['id']!=pr['base']['repo']['id']\n\
+          values={'PR_NUMBER':number,'HEAD_SHA':head,'BASE_SHA':base,'HEAD_REPO_ID':str(pr['head']['repo']['id']),'HEAD_REPO':repo,'CONTRIBUTOR':author,'EXTERNAL_FORK':str(external).lower()}\n\
+          Path('/tmp/oss-ci-identity.env').write_text('\\n'.join('export '+k+'='+shlex.quote(v) for k,v in values.items())+'\\\
+          n')\nprint(json.dumps(dict(values,contributor_code_executed=False,protected_asset_downloaded=False)))\nCODE\n. /tmp/oss-ci-identity.env\n"
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+          EXPECTED_SHA: ${{ inputs.head_sha }}
+          EXPECTED_BASE_SHA: ${{ inputs.base_sha }}
+        output:
+        - name: PR_NUMBER
+        - name: HEAD_SHA
+        - name: BASE_SHA
+        - name: HEAD_REPO_ID
+        - name: HEAD_REPO
+        - name: CONTRIBUTOR
+        - name: EXTERNAL_FORK
+      name: snapshot_pr
+    name: verify_pr_identity
+  - id: owner_approval
+    steps:
+    - id: approve_exact_revisions
+      timeout: 1h
+      approval:
+        uses: harness
+        with:
+          user-groups:
+          - OWNER_GROUP_REQUIRED
+          approvers-min-count: 1
+          auto-approve: false
+          block-executor: false
+          execution-details: true
+          message: 'Approve external fork test execution only. Credentials remain in trusted stages.
+
+            PR: https://github.com/ansibleautomates/oss-ci-approval-lab/pull/<+pipeline.stages.verify_pr_identity.steps.snapshot_pr.output.outputVariables.PR_NUMBER>
+
+            Contributor: <+pipeline.stages.verify_pr_identity.steps.snapshot_pr.output.outputVariables.CONTRIBUTOR>
+
+            Source: <+pipeline.stages.verify_pr_identity.steps.snapshot_pr.output.outputVariables.HEAD_REPO>
+
+            External fork: <+pipeline.stages.verify_pr_identity.steps.snapshot_pr.output.outputVariables.EXTERNAL_FORK>
+
+            Head: <+pipeline.stages.verify_pr_identity.steps.snapshot_pr.output.outputVariables.HEAD_SHA>
+
+            Base: <+pipeline.stages.verify_pr_identity.steps.snapshot_pr.output.outputVariables.BASE_SHA>'
+      name: approve_exact_revisions
+    name: owner_approval
+  - id: trusted_preparation
+    runtime: cloud
+    clone:
+      enabled: false
+    cache:
+      enabled: false
+    steps:
+    - id: download_fixed_asset
+      run:
+        shell: bash
+        script: "set -eu\npython3 - <<'CODE'\nimport base64,hashlib,json,os,re,shlex,urllib.request\nfrom pathlib import Path\n\
+          head=os.environ.get('EXPECTED_SHA','');number=os.environ.get('PR_NUMBER','');expected_base=os.environ.get('EXPECTED_BASE_SHA','')\n\
+          assert re.fullmatch(r'[0-9a-f]{40}',head), 'Full PR head SHA required'\nassert re.fullmatch(r'[1-9][0-9]*',number),\
+          \ 'Positive PR number required'\nassert not expected_base or re.fullmatch(r'[0-9a-f]{40}',expected_base), 'Full\
+          \ base SHA required'\nassert os.environ['APPROVAL_STATUS'] in {'SUCCEEDED','Success','Succeeded'}, 'Real owner approval\
+          \ required'\nassert os.environ['OSS_CI_CANARY'].startswith('synthetic-only-')\ndef api(path,data=None):\n    req=urllib.request.Request('https://api.github.com/'+path,data=None\
+          \ if data is None else json.dumps(data).encode(),headers={'Authorization':'Bearer '+os.environ['OSS_CI_ASSETS_TOKEN'],'Accept':'application/vnd.github+json','Content-Type':'application/json'})\n\
+          \    with urllib.request.urlopen(req,timeout=30) as response:return json.load(response)\nroot='repos/ansibleautomates/oss-ci-approval-lab/'\n\
+          pr=api(root+'pulls/'+number)\nassert pr['base']['repo']['id']==1369877762 and pr['base']['ref']=='main' and pr['state']=='open',\
+          \ 'Wrong PR destination or closed PR'\nassert pr['head']['repo'] is not None and str(pr['head']['repo']['id'])==os.environ['EXPECTED_HEAD_REPO_ID'],\
+          \ 'PR source changed after approval'\nassert str(pr['head']['repo']['id']!=pr['base']['repo']['id']).lower()==os.environ['EXPECTED_EXTERNAL_FORK'],\
+          \ 'Fork identity changed after approval'\nassert pr['head']['sha']==head, 'PR changed since trigger; use the new\
+          \ revision'\nbase=api(root+'git/ref/heads/main')['object']['sha']\nassert not expected_base or expected_base==base,\
+          \ 'Base changed; use the current base revision'\nassert re.fullmatch(r'[0-9a-f]{40}',base)\nresponse=api('repos/ansibleautomates/oss-ci-trust-assets/contents/fixtures/pricing.json?ref=28f7f9357805f762bdfd9016c8643ffb07c6c50f')\n\
+          data=json.loads(base64.b64decode(response['content']))\nassert set(data)=={'schema','currency','discount_percent','items'}\
+          \ and data=={'schema':1,'currency':'USD','discount_percent':10,'items':[10,20]}\nasset=json.dumps(data,sort_keys=True,separators=(',',':')).encode()\n\
+          machine=Path('/proc/sys/kernel/random/boot_id').read_text().strip()\nPath('/tmp/oss-ci-trusted-sentinel').write_text(machine)\n\
+          values={'ASSET_B64':base64.b64encode(asset).decode(),'ASSET_SHA256':hashlib.sha256(asset).hexdigest(),'PREP_MACHINE_ID':machine,'VERIFIED_HEAD_SHA':head,'VERIFIED_BASE_SHA':base}\n\
+          Path('/tmp/oss-ci-prepared.env').write_text('\\n'.join('export '+k+'='+shlex.quote(v) for k,v in values.items())+'\\\
+          n')\napi(root+'statuses/'+head,{'state':'pending','context':'harness/approved-pinned-merge','description':'Testing\
+          \ verified base '+base[:12]+' and PR head'})\nprint(json.dumps({'pr_number':int(number),'external_fork':pr['head']['repo']['id']!=pr['base']['repo']['id'],'verified_head_sha':head,'verified_base_sha':base,'private_asset_downloaded':True,'canary_resolved':True,'contributor_code_executed':False,'asset_sha256':values['ASSET_SHA256']}))\n\
+          CODE\n. /tmp/oss-ci-prepared.env\n"
+        env:
+          OSS_CI_CANARY: <+secrets.getValue("oss_ci_canary")>
+          OSS_CI_ASSETS_TOKEN: <+secrets.getValue("oss_ci_assets_token")>
+          EXPECTED_SHA: <+pipeline.stages.verify_pr_identity.steps.snapshot_pr.output.outputVariables.HEAD_SHA>
+          PR_NUMBER: <+pipeline.stages.verify_pr_identity.steps.snapshot_pr.output.outputVariables.PR_NUMBER>
+          EXPECTED_BASE_SHA: <+pipeline.stages.verify_pr_identity.steps.snapshot_pr.output.outputVariables.BASE_SHA>
+          EXPECTED_HEAD_REPO_ID: <+pipeline.stages.verify_pr_identity.steps.snapshot_pr.output.outputVariables.HEAD_REPO_ID>
+          EXPECTED_EXTERNAL_FORK: <+pipeline.stages.verify_pr_identity.steps.snapshot_pr.output.outputVariables.EXTERNAL_FORK>
+          APPROVAL_STATUS: <+pipeline.stages.owner_approval.steps.approve_exact_revisions.status>
+        output:
+        - name: ASSET_B64
+        - name: ASSET_SHA256
+        - name: PREP_MACHINE_ID
+        - name: VERIFIED_HEAD_SHA
+        - name: VERIFIED_BASE_SHA
+      name: download_fixed_asset
+    name: trusted_preparation
+  - id: contributor_tests
+    chain:
+      uses: default/chef_oss_pov/oss_approval_worker
+      ref: main
+      with:
+        inputs:
+          head_sha: <+pipeline.stages.trusted_preparation.steps.download_fixed_asset.output.outputVariables.VERIFIED_HEAD_SHA>
+          asset_b64: <+pipeline.stages.trusted_preparation.steps.download_fixed_asset.output.outputVariables.ASSET_B64>
+          asset_sha256: <+pipeline.stages.trusted_preparation.steps.download_fixed_asset.output.outputVariables.ASSET_SHA256>
+          prep_machine_id: <+pipeline.stages.trusted_preparation.steps.download_fixed_asset.output.outputVariables.PREP_MACHINE_ID>
+          base_sha: <+pipeline.stages.trusted_preparation.steps.download_fixed_asset.output.outputVariables.VERIFIED_BASE_SHA>
+    name: contributor_tests
+  - id: trusted_reporting
+    runtime: cloud
+    clone:
+      enabled: false
+    cache:
+      enabled: false
+    steps:
+    - id: post_commit_status
+      run:
+        shell: bash
+        script: "set -eu\npython3 - <<'CODE'\nimport json,os,re,urllib.request\nhead=os.environ['EXPECTED_SHA'];base=os.environ['EXPECTED_BASE_SHA'];number=os.environ['PR_NUMBER']\n\
+          assert all(re.fullmatch(r'[0-9a-f]{40}',v) for v in (head,base)) and re.fullmatch(r'[1-9][0-9]*',number)\nstatus=os.environ['VALIDATION_STATUS'];execution=os.environ['EXECUTION_ID']\n\
+          assert re.fullmatch(r'[A-Za-z0-9_-]+',execution)\nassert status in {'Success','SUCCEEDED','Succeeded','Failed','FAILED','Failure','Aborted','ABORTED','Expired','ERRORED','Errored','Skipped','SKIPPED'},\
+          \ 'Unknown child status'\ndef api(path,data=None):\n    req=urllib.request.Request('https://api.github.com/'+path,data=None\
+          \ if data is None else json.dumps(data).encode(),headers={'Authorization':'Bearer '+os.environ['OSS_CI_ASSETS_TOKEN'],'Accept':'application/vnd.github+json','Content-Type':'application/json'})\n\
+          \    with urllib.request.urlopen(req,timeout=30) as response:return json.load(response)\nroot='repos/ansibleautomates/oss-ci-approval-lab/'\n\
+          pr=api(root+'pulls/'+number)\ncurrent_base=api(root+'git/ref/heads/main')['object']['sha']\nfresh=pr['head']['sha']==head\
+          \ and current_base==base and pr['state']=='open' and pr['base']['repo']['id']==1369877762 and pr['base']['ref']=='main'\n\
+          success=status in {'Success','SUCCEEDED','Succeeded'} and fresh\nurl='https://unifiedpipeline.harness.io/ng/account/MGY3MmJmM2ItNTY5Ny00Yj/all/orgs/default/projects/chef_oss_pov/pipelines/oss_approval_parent/deployments/'+execution+'/pipeline'\n\
+          payload={'state':'success' if success else 'failure','context':'harness/approved-pinned-merge','description':('Passed'\
+          \ if success else 'Failed or revision changed')+'; base '+base[:12],'target_url':url}\nresult=api(root+'statuses/'+head,payload)\n\
+          assert result['state']==payload['state']\nprint(json.dumps({'github_status_posted':result['state'],'head_sha':head,'tested_base_sha':base,'current_base_sha':current_base,'revision_pair_still_current':fresh,'child_status':status,'contributor_code_executed':False}))\n\
+          assert fresh, 'Revision changed during execution; rerun required'\nCODE\n"
+        env:
+          EXPECTED_SHA: <+pipeline.stages.trusted_preparation.steps.download_fixed_asset.output.outputVariables.VERIFIED_HEAD_SHA>
+          VALIDATION_STATUS: <+pipeline.stages.contributor_tests.status>
+          EXECUTION_ID: <+pipeline.executionId>
+          OSS_CI_ASSETS_TOKEN: <+secrets.getValue("oss_ci_assets_token")>
+          EXPECTED_BASE_SHA: <+pipeline.stages.trusted_preparation.steps.download_fixed_asset.output.outputVariables.VERIFIED_BASE_SHA>
+          PR_NUMBER: ${{ inputs.pr_number }}
+      name: post_commit_status
+    if: <+Always> && <+pipeline.stages.trusted_preparation.status> == "SUCCEEDED"
+    name: trusted_reporting
+  allow-stage-executions: false
+  fixed-inputs-on-rerun: false
